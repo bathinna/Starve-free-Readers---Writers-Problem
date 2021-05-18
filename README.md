@@ -1,156 +1,85 @@
 # Starve-free-Readers---Writers-Problem
-The reader-writer problems deal with synchronizing multiple processes trying to read or write upon a shared data. The first and second problem provide a solution where either the reader or writer processes can possibly starve. The third readers-writers problem deals with an implementation where neither the reader or the writer process will ever starve. Following is the explanation on how it would be done with cpp-like pseudocode :
+The third readers-writers problem
+We will build the solution using C code. We will use semaphores for mutual exclusion (mutex). Those semaphores, being used as locks, are all initialized in the released state (1 available place); those initializations will not appear in code snippets below but will be shown in comments.
 
-### The Semaphore
+First of all, we said earlier that we want fair-queuing between readers and writers in order to prevent starvation. To achieve that, we will use a semaphore named orderMutex that will materialize the order of arrival. This semaphore will be taken by any entity that requests access to the resource, and released as soon as this entity gains access to the resource:
 
-First, let's discuss the implementation of the semaphore. For a starve-free implementation, we need a semaphore that has a First-In-First-Out manner of handling the waiting processes. i.e. - the process that call wait first are the ones are the process that are given the access to semaphore first. 
 
-The code for the semaphore :
+semaphore orderMutex;      // Initialized to 1
 
-```cpp
-// The code for a  semaphore.
-struct Semaphore
+void reader()
 {
-    int value = 1;
-    Queue* Q = new Queue();
-    
-    void wait(int process_id)
-    {
-        value--;
-        if(value < 0)
-        {
-            Q->push(process_id);
-            block(); //this function will block the proccess until it's woken up.
-            // I have used non-busy waiting but busy waiting is also possible 
-            // in case of block() and wakeup() equivalents being not callable or available in the language.
-        }
-    }
-    
-    void signal()
-    {
-        value++;
-        if(value <= 0)
-        {
-            int pid = Q->pop();
-            wakeup(pid); //this function will wakeup the process with the given pid.
-        }
-    }
+  P(orderMutex);           // Remember our order of arrival
+  ...
+  V(orderMutex);           // Released when the reader can access the resource
+  ...
 }
 
-//The code for the queue which will allow us to make a FIFO semaphore.
-struct Queue
+void writer()
 {
-    Node* Front, Rear;
-   	void push(int val)
-    {
-        Node* n = new Node();
-        n->value = val;
-        if(Rear != NULL)
-        {
-            Rear->next = n;
-            Rear = n;
-        }
-        else
-        {
-            Front = Rear = n;
-        }
-    }
-    
-    int pop()
-    {
-        if(Front == NULL)
-        {
-            return -1; // Error : underflow.
-        }
-        else
-        {
-            int val = Front->value;
-            Front = Front->next;
-            if(Front == NULL)
-            {
-                Rear = NULL;
-            }
-            return val;
-        }
-    }
+  P(orderMutex);           // Remember our orderof arrival
+  ...
+  V(orderMutex);           // Released when the writer can access the resource
+}
+Now, we can write the writer code as it is the most straightforward of both. The writer wants an exclusive access to the resource. We will create a new semaphore named accessMutex that the writer will request before modifying the resource:
+semaphore accessMutex;     // Initialized to 1
+semaphore orderMutex;      // Initialized to 1
+
+void reader()
+{
+  P(orderMutex);           // Remember our order of arrival
+  ...
+  V(orderMutex);           // Released when the reader can access the resource
+  ...
 }
 
-// A queue node.
-Struct Node
+void writer()
 {
-    Node* next;
-    int value;
+  P(orderMutex);           // Remember our order of arrival
+  P(accessMutex);          // Request exclusive access to the resource
+  V(orderMutex);           // Release order of arrival semaphore (we have been served)
+
+  WriteResource();         // Here the writer can modify the resource at will
+
+  V(accessMutex);          // Release exclusive access to the resource
 }
-```
+The reader code is a bit more complicated as multiple readers can simultaneously access the resource. We want t first reader to get access to the resource to lock it so that no writer can access it at the same time. Similarly, when a reader is done with the resource, it needs to release the lock on the resource if there are no more readers currently accessing it.
 
-Thus, a FIFO semaphore can be implemented. A queue is used to manage the waiting processes. The process gets blocked after pushing itself onto the queue and is woken up in FIFO order when some other process releases the semaphore. I have also shown the implementation of the Queue required for the same. 
-
-Next, we discuss the readers and writers process and then discuss how it works in the end.
-
-### Global Variables
-
-Following are the global variables and their initialization.
-
-```cpp
-//Shared data members
-Semaphore* in_sem = new Semaphore();
-Semaphore* out_sem = new Semaphore();
-Semaphore* writer_sem = new Semaphore();
-writer_sem->value = 0; //Why this is initialized to zero will be explained later.
-int num_started = 0; // a count of how many readers have started reading.
-int num_completed = 0;// a count of how many readers have completed reading.
-//num_started and num_completed are kept in different variable
-//instead of merging them into one is because they would be changed by different semaphores.
-bool writer_waiting = false; // this indicated whether a writing is waiting.
-```
+This is similar to a light switch in a dark room: the first person entering the room will turn the lights on, while the last person leaving the room will turn the lights off. However, it is much more simple if the room has only one door and only one person can enter or leave the room at the same time, to prevent someone from switching the lights off when someone enters at the same time using another door. This is why we will use a counter named readers representing the number of readers currently accessing the resource, as well as a semaphore named readersMutex to protect the counter against conflicting accesses.
 
 
+semaphore accessMutex;     // Initialized to 1
+semaphore readersMutex;    // Initialized to 1
+semaphore orderMutex;      // Initialized to 1
 
-### Reader Process Code
+unsigned int readers = 0;  // Number of readers accessing the resource
 
-Following is the code for the reader process :
-
-```cpp
-//Reader Process
-in_sem->wait(process_id); //wait on the in_sem semaphore.
-//I am assuming the process's id is available to use in process_id.
-num_started++;//increment num_started since this process will now start reading.
-in_sem->signal();
-
-//Read the data. This is the "critical section".
-
-out_sem->wait(process_id); //wait on the out_sem semaphore.
-num_completed++;//increment num_completed since we have completed reading.
-if(writer_waiting && num_started == num_completed)
+void reader()
 {
-    writer_sem->signal();
-}
-out_sem->signal();
-```
+  P(orderMutex);           // Remember our order of arrival
 
+  P(readersMutex);         // We will manipulate the readers counter
+  if (readers == 0)        // If there are currently no readers (we came first)...
+    P(accessMutex);        // ...requests exclusive access to the resource for readers
+  readers++;               // Note that there is now one more reader
+  V(orderMutex);           // Release order of arrival semaphore (we have been served)
+  V(readersMutex);         // We are done accessing the number of readers for now
 
+  ReadResource();          // Here the reader can read the resource at will
 
-### Writer Process Code
-
-Following is the code for the writer process : 
-
-```cpp
-//Writer Process
-in_sem->wait(process_id);
-out_sem->wait(process_id);
-if(num_started == num_completed)
-{
-    out_sem->signal();
-}
-else
-{
-    writer_waiting = true;
-    out_sem->signal();
-    writer_sem->wait();
-    writer_waiting = false;
+  P(readersMutex);         // We will manipulate the readers counter
+  readers--;               // We are leaving, there is one less reader
+  if (readers == 0)        // If there are no more readers currently reading...
+    V(accessMutex);        // ...release exclusive access to the resource
+  V(readersMutex);         // We are done accessing the number of readers for now
 }
 
-//Write the data. This is the "critical section"
+void writer()
+{
+  P(orderMutex);           // Remember our order of arrival
+  P(accessMutex);          // Request exclusive access to the resource
+  V(orderMutex);           // Release order of arrival semaphore (we have been served)
 
-in_sem->signal();
-```
+  WriteResource();         // Here the writer can modify the resource at will
+
+  V(accessMutex);          // Release exclusive access to the resource
